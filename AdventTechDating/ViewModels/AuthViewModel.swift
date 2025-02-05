@@ -1,6 +1,7 @@
 import Foundation
 import FirebaseAuth
 import FirebaseFirestore
+import SwiftUI
 
 class AuthViewModel: ObservableObject {
     @Published var userSession: FirebaseAuth.User?
@@ -9,7 +10,42 @@ class AuthViewModel: ObservableObject {
     @Published var isLoading = false
     @Published var isEmailVerified = false
     
+    @AppStorage("rememberMe") private var rememberMe = false
+    @AppStorage("savedEmail") private var savedEmail = ""
+    
     private let db = Firestore.firestore()
+    
+    enum AuthError: LocalizedError {
+        case weakPassword
+        case emailAlreadyInUse
+        case invalidEmail
+        case userNotFound
+        case wrongPassword
+        case networkError
+        case tooManyRequests
+        case unknown(String)
+        
+        var errorDescription: String? {
+            switch self {
+            case .weakPassword:
+                return "Please use a stronger password"
+            case .emailAlreadyInUse:
+                return "This email is already registered"
+            case .invalidEmail:
+                return "Please enter a valid email address"
+            case .userNotFound:
+                return "No account found with this email"
+            case .wrongPassword:
+                return "Incorrect password"
+            case .networkError:
+                return "Network error. Please check your connection"
+            case .tooManyRequests:
+                return "Too many attempts. Please try again later"
+            case .unknown(let message):
+                return message
+            }
+        }
+    }
     
     init() {
         self.userSession = Auth.auth().currentUser
@@ -22,18 +58,26 @@ class AuthViewModel: ObservableObject {
         }
     }
     
-    func signIn(withEmail email: String, password: String) async throws {
+    func signIn(withEmail email: String, password: String, rememberMe: Bool) async throws {
         isLoading = true
         do {
             let result = try await Auth.auth().signIn(withEmail: email, password: password)
             self.userSession = result.user
             self.isEmailVerified = result.user.isEmailVerified
+            
+            // Handle Remember Me
+            self.rememberMe = rememberMe
+            if rememberMe {
+                self.savedEmail = email
+            } else {
+                self.savedEmail = ""
+            }
+            
             await fetchUser(withUid: result.user.uid)
             isLoading = false
         } catch {
             isLoading = false
-            errorMessage = error.localizedDescription
-            throw error
+            throw mapFirebaseError(error)
         }
     }
     
@@ -122,5 +166,27 @@ class AuthViewModel: ObservableObject {
         guard let user = Auth.auth().currentUser else { return }
         try? await user.reload()
         self.isEmailVerified = user.isEmailVerified
+    }
+    
+    private func mapFirebaseError(_ error: Error) -> Error {
+        let authError = error as NSError
+        switch authError.code {
+        case AuthErrorCode.wrongPassword.rawValue:
+            return AuthError.wrongPassword
+        case AuthErrorCode.invalidEmail.rawValue:
+            return AuthError.invalidEmail
+        case AuthErrorCode.emailAlreadyInUse.rawValue:
+            return AuthError.emailAlreadyInUse
+        case AuthErrorCode.weakPassword.rawValue:
+            return AuthError.weakPassword
+        case AuthErrorCode.userNotFound.rawValue:
+            return AuthError.userNotFound
+        case AuthErrorCode.networkError.rawValue:
+            return AuthError.networkError
+        case AuthErrorCode.tooManyRequests.rawValue:
+            return AuthError.tooManyRequests
+        default:
+            return AuthError.unknown(error.localizedDescription)
+        }
     }
 } 

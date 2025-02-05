@@ -3,6 +3,8 @@ import SwiftUI
 struct LoginView: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject var authViewModel: AuthViewModel
+    @AppStorage("rememberMe") private var rememberMe = false
+    @AppStorage("savedEmail") private var savedEmail = ""
     @State private var email = ""
     @State private var password = ""
     @State private var showSignUp = false
@@ -52,24 +54,19 @@ struct LoginView: View {
                     .foregroundColor(.yellow)
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     
+                    // Remember Me Toggle
+                    Toggle("Remember Me", isOn: $rememberMe)
+                        .padding(.horizontal)
+                    
                     // Sign In Button
-                    Button(action: {
-                        Task {
-                            try await authViewModel.signIn(withEmail: email, password: password)
-                        }
-                    }) {
-                        if authViewModel.isLoading {
-                            ProgressView()
-                                .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                        } else {
-                            Text("Sign In")
-                        }
+                    Button(action: login) {
+                        Text(authViewModel.isLoading ? "Signing in..." : "Sign In")
+                            .frame(maxWidth: .infinity)
+                            .padding()
+                            .background(Color.yellow)
+                            .foregroundColor(.white)
+                            .cornerRadius(10)
                     }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 50)
-                    .background(Color.yellow)
-                    .foregroundColor(.white)
-                    .cornerRadius(10)
                     .disabled(authViewModel.isLoading)
                     
                     // Error Message
@@ -99,6 +96,25 @@ struct LoginView: View {
         .sheet(isPresented: $showForgotPassword) {
             ForgotPasswordView()
                 .environmentObject(authViewModel)
+        }
+        .onAppear {
+            if rememberMe {
+                email = savedEmail
+            }
+        }
+    }
+    
+    private func login() {
+        Task {
+            do {
+                try await authViewModel.signIn(
+                    withEmail: email,
+                    password: password,
+                    rememberMe: rememberMe
+                )
+            } catch {
+                // Error will be handled by AuthViewModel
+            }
         }
     }
 }
