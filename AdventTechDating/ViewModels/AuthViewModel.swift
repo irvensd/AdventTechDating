@@ -4,17 +4,23 @@ import FirebaseFirestore
 import SwiftUI
 
 class AuthViewModel: ObservableObject {
-    @Published var userSession: FirebaseAuth.User?
-    @Published var currentUser: UserProfile?
-    @Published var errorMessage: String?
-    @Published var isLoading = false
-    @Published var isEmailVerified = false
+    // MARK: - Published Properties
+    // These properties will automatically update the UI when changed
+    @Published var userSession: FirebaseAuth.User?     // Current Firebase user session
+    @Published var currentUser: UserProfile?           // User's profile data
+    @Published var errorMessage: String?              // Error messages to display
+    @Published var isLoading = false                  // Loading state for UI feedback
+    @Published var isEmailVerified = false            // Email verification status
     
+    // MARK: - Persistent Storage
+    // UserDefaults storage for remember me functionality
     @AppStorage("rememberMe") private var rememberMe = false
     @AppStorage("savedEmail") private var savedEmail = ""
     
-    private let db = Firestore.firestore()
+    private let db = Firestore.firestore()            // Firestore database reference
     
+    // MARK: - Error Handling
+    // Custom error types for better error messages
     enum AuthError: LocalizedError {
         case weakPassword
         case emailAlreadyInUse
@@ -25,6 +31,7 @@ class AuthViewModel: ObservableObject {
         case tooManyRequests
         case unknown(String)
         
+        // Human-readable error messages
         var errorDescription: String? {
             switch self {
             case .weakPassword:
@@ -47,6 +54,8 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Initialization
+    // Check for existing session and fetch user data if logged in
     init() {
         self.userSession = Auth.auth().currentUser
         self.isEmailVerified = Auth.auth().currentUser?.isEmailVerified ?? false
@@ -58,14 +67,22 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    // MARK: - Authentication Methods
+    
+    /// Signs in a user with email and password
+    /// - Parameters:
+    ///   - email: User's email
+    ///   - password: User's password
+    ///   - rememberMe: Whether to save email for future logins
     func signIn(withEmail email: String, password: String, rememberMe: Bool) async throws {
         isLoading = true
         do {
+            // Attempt Firebase authentication
             let result = try await Auth.auth().signIn(withEmail: email, password: password)
             self.userSession = result.user
             self.isEmailVerified = result.user.isEmailVerified
             
-            // Handle Remember Me
+            // Handle Remember Me functionality
             self.rememberMe = rememberMe
             if rememberMe {
                 self.savedEmail = email
@@ -73,6 +90,7 @@ class AuthViewModel: ObservableObject {
                 self.savedEmail = ""
             }
             
+            // Fetch user's profile data
             await fetchUser(withUid: result.user.uid)
             isLoading = false
         } catch {
@@ -81,15 +99,23 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    /// Creates a new user account
+    /// - Parameters:
+    ///   - email: New user's email
+    ///   - password: New user's password
+    ///   - firstName: User's first name
+    ///   - lastName: User's last name
     func createUser(email: String, password: String, firstName: String, lastName: String) async throws {
         isLoading = true
         do {
+            // Create Firebase auth account
             let result = try await Auth.auth().createUser(withEmail: email, password: password)
             self.userSession = result.user
             
             // Send verification email
             try await result.user.sendEmailVerification()
             
+            // Create user profile
             let user = UserProfile(
                 id: result.user.uid,
                 firstName: firstName,
@@ -102,6 +128,7 @@ class AuthViewModel: ObservableObject {
                 profileCompleted: false
             )
             
+            // Save user data to Firestore
             try await saveUserData(user)
             self.currentUser = user
             isLoading = false
@@ -112,6 +139,7 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    /// Signs out the current user
     func signOut() throws {
         do {
             try Auth.auth().signOut()
@@ -123,6 +151,9 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    // MARK: - User Data Methods
+    
+    /// Fetches user profile data from Firestore
     @MainActor
     func fetchUser(withUid uid: String) async {
         do {
@@ -133,10 +164,14 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    /// Saves user profile data to Firestore
     private func saveUserData(_ user: UserProfile) async throws {
         try db.collection("users").document(user.id).setData(from: user)
     }
     
+    // MARK: - Password Reset & Verification
+    
+    /// Sends password reset email
     func resetPassword(email: String) async throws {
         isLoading = true
         do {
@@ -149,6 +184,7 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    /// Resends verification email to current user
     func resendVerificationEmail() async throws {
         guard let user = Auth.auth().currentUser else { return }
         isLoading = true
@@ -162,12 +198,16 @@ class AuthViewModel: ObservableObject {
         }
     }
     
+    /// Checks if user's email is verified
     func checkEmailVerification() async {
         guard let user = Auth.auth().currentUser else { return }
         try? await user.reload()
         self.isEmailVerified = user.isEmailVerified
     }
     
+    // MARK: - Error Mapping
+    
+    /// Converts Firebase errors to custom AuthError types
     private func mapFirebaseError(_ error: Error) -> Error {
         let authError = error as NSError
         switch authError.code {
