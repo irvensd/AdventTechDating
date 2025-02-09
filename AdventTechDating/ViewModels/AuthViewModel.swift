@@ -2,25 +2,29 @@ import Foundation
 import FirebaseAuth
 import FirebaseFirestore
 import SwiftUI
+import FirebaseStorage
 
 class AuthViewModel: ObservableObject {
     // MARK: - Published Properties
-    // These properties will automatically update the UI when changed
-    @Published var userSession: FirebaseAuth.User?     // Current Firebase user session
-    @Published var currentUser: UserProfile?           // User's profile data
-    @Published var errorMessage: String?              // Error messages to display
-    @Published var isLoading = false                  // Loading state for UI feedback
-    @Published var isEmailVerified = false            // Email verification status
+    // These properties automatically update the UI when changed
+    @Published var userSession: FirebaseAuth.User?     // Tracks current Firebase user session
+    @Published var currentUser: UserProfile?           // Stores the user's complete profile data
+    @Published var errorMessage: String?               // Holds error messages for display
+    @Published var isLoading = false                   // Loading state for UI feedback
+    @Published var isEmailVerified = false            // Tracks email verification status
+    @Published var profileCompletionStatus: ProfileCompletionStatus = .incomplete
+    @Published var requiredFieldsCompleted: Set<ProfileField> = []
     
     // MARK: - Persistent Storage
-    // UserDefaults storage for remember me functionality
+    // UserDefaults for remembering user login preferences
     @AppStorage("rememberMe") private var rememberMe = false
     @AppStorage("savedEmail") private var savedEmail = ""
     
-    private let db = Firestore.firestore()            // Firestore database reference
+    // Firebase Firestore reference
+    private let db = Firestore.firestore()
     
     // MARK: - Error Handling
-    // Custom error types for better error messages
+    // Custom error types for better user feedback
     enum AuthError: LocalizedError {
         case weakPassword
         case emailAlreadyInUse
@@ -31,7 +35,7 @@ class AuthViewModel: ObservableObject {
         case tooManyRequests
         case unknown(String)
         
-        // Human-readable error messages
+        // Human-readable error descriptions
         var errorDescription: String? {
             switch self {
             case .weakPassword:
@@ -54,44 +58,25 @@ class AuthViewModel: ObservableObject {
         }
     }
     
-    // MARK: - Initialization
-    // Check for existing session and fetch user data if logged in
-    init() {
-        self.userSession = Auth.auth().currentUser
-        self.isEmailVerified = Auth.auth().currentUser?.isEmailVerified ?? false
-        
-        if let userSession = userSession {
-            Task {
-                await fetchUser(withUid: userSession.uid)
-            }
-        }
-    }
-    
     // MARK: - Authentication Methods
     
-    /// Signs in a user with email and password
-    /// - Parameters:
-    ///   - email: User's email
-    ///   - password: User's password
-    ///   - rememberMe: Whether to save email for future logins
+    /// Signs in user with email and password
     func signIn(withEmail email: String, password: String, rememberMe: Bool) async throws {
         isLoading = true
         do {
             // Attempt Firebase authentication
             let result = try await Auth.auth().signIn(withEmail: email, password: password)
             self.userSession = result.user
-            self.isEmailVerified = result.user.isEmailVerified
             
-            // Handle Remember Me functionality
-            self.rememberMe = rememberMe
+            // Save email if remember me is enabled
             if rememberMe {
                 self.savedEmail = email
-            } else {
-                self.savedEmail = ""
+                self.rememberMe = true
             }
             
-            // Fetch user's profile data
-            await fetchUser(withUid: result.user.uid)
+            // Fetch user profile after successful login
+            try await fetchUserProfile()
+            
             isLoading = false
         } catch {
             isLoading = false
@@ -99,12 +84,7 @@ class AuthViewModel: ObservableObject {
         }
     }
     
-    /// Creates a new user account
-    /// - Parameters:
-    ///   - email: New user's email
-    ///   - password: New user's password
-    ///   - firstName: User's first name
-    ///   - lastName: User's last name
+    /// Creates new user account and profile
     func createUser(email: String, password: String, firstName: String, lastName: String) async throws {
         isLoading = true
         do {
@@ -112,64 +92,51 @@ class AuthViewModel: ObservableObject {
             let result = try await Auth.auth().createUser(withEmail: email, password: password)
             self.userSession = result.user
             
-            // Send verification email
-            try await result.user.sendEmailVerification()
-            
-            // Create user profile
+            // Create initial user profile
             let user = UserProfile(
                 id: result.user.uid,
                 firstName: firstName,
                 lastName: lastName,
                 email: email,
                 birthDate: Date(),
-                createdAt: Date(),
-                gender: nil,
-                lookingFor: nil,
-                profileCompleted: false
+                createdAt: Date()
             )
             
-            // Save user data to Firestore
-            try await saveUserData(user)
+            // Save profile to Firestore
+            try await db.collection("users").document(result.user.uid).setData(from: user)
             self.currentUser = user
+            
+            // Send verification email
+            try await result.user.sendEmailVerification()
+            
             isLoading = false
         } catch {
             isLoading = false
-            errorMessage = error.localizedDescription
-            throw error
+            throw mapFirebaseError(error)
         }
     }
     
-    /// Signs out the current user
+    /// Fetches user profile from Firestore
+    private func fetchUserProfile() async throws {
+        guard let uid = Auth.auth().currentUser?.uid else { return }
+        
+        let snapshot = try await db.collection("users").document(uid).getDocument()
+        self.currentUser = try snapshot.data(as: UserProfile.self)
+    }
+    
+    /// Signs out current user
     func signOut() throws {
         do {
             try Auth.auth().signOut()
             self.userSession = nil
             self.currentUser = nil
+            if !rememberMe {
+                self.savedEmail = ""
+            }
         } catch {
-            errorMessage = error.localizedDescription
             throw error
         }
     }
-    
-    // MARK: - User Data Methods
-    
-    /// Fetches user profile data from Firestore
-    @MainActor
-    func fetchUser(withUid uid: String) async {
-        do {
-            let snapshot = try await db.collection("users").document(uid).getDocument()
-            self.currentUser = try snapshot.data(as: UserProfile.self)
-        } catch {
-            errorMessage = error.localizedDescription
-        }
-    }
-    
-    /// Saves user profile data to Firestore
-    private func saveUserData(_ user: UserProfile) async throws {
-        try db.collection("users").document(user.id).setData(from: user)
-    }
-    
-    // MARK: - Password Reset & Verification
     
     /// Sends password reset email
     func resetPassword(email: String) async throws {
@@ -179,12 +146,11 @@ class AuthViewModel: ObservableObject {
             isLoading = false
         } catch {
             isLoading = false
-            errorMessage = error.localizedDescription
-            throw error
+            throw mapFirebaseError(error)
         }
     }
     
-    /// Resends verification email to current user
+    /// Resends verification email
     func resendVerificationEmail() async throws {
         guard let user = Auth.auth().currentUser else { return }
         isLoading = true
@@ -207,7 +173,7 @@ class AuthViewModel: ObservableObject {
     
     // MARK: - Error Mapping
     
-    /// Converts Firebase errors to custom AuthError types
+    /// Maps Firebase errors to custom AuthError types
     private func mapFirebaseError(_ error: Error) -> Error {
         let authError = error as NSError
         switch authError.code {
@@ -227,6 +193,151 @@ class AuthViewModel: ObservableObject {
             return AuthError.tooManyRequests
         default:
             return AuthError.unknown(error.localizedDescription)
+        }
+    }
+    
+    /// Updates profile completion status
+    func updateProfileCompletion() {
+        guard let profile = currentUser else {
+            profileCompletionStatus = .incomplete
+            return
+        }
+        
+        // Check required fields
+        var completedFields: Set<ProfileField> = []
+        
+        // Check photos
+        if profile.photoURL != nil {
+            completedFields.insert(.photos)
+        }
+        
+        // Check bio
+        if let bio = profile.bio, !bio.isEmpty {
+            completedFields.insert(.bio)
+        }
+        
+        // Check interests
+        if let interests = profile.interests, !interests.isEmpty {
+            completedFields.insert(.interests)
+        }
+        
+        // Check faith values
+        if profile.baptized != nil && profile.denomination != nil {
+            completedFields.insert(.faith)
+        }
+        
+        // Check location
+        if profile.location != nil {
+            completedFields.insert(.location)
+        }
+        
+        // Update completion status
+        self.requiredFieldsCompleted = completedFields
+        
+        let completionPercentage = Double(completedFields.count) / Double(ProfileField.allCases.count)
+        
+        switch completionPercentage {
+        case 1.0:
+            profileCompletionStatus = .complete
+        case 0.5..<1.0:
+            profileCompletionStatus = .basic
+        default:
+            profileCompletionStatus = .incomplete
+        }
+        
+        // Update profile completion status in Firestore
+        Task {
+            try? await updateProfileCompletionStatus()
+        }
+    }
+    
+    /// Updates profile completion status in Firestore
+    private func updateProfileCompletionStatus() async throws {
+        guard let userId = userSession?.uid else { return }
+        
+        let data: [String: Any] = [
+            "profileCompleted": profileCompletionStatus == .complete,
+            "completedFields": Array(requiredFieldsCompleted.map { $0.rawValue })
+        ]
+        
+        try await db.collection("users").document(userId).updateData(data)
+    }
+    
+    /// Uploads profile photo to Firebase Storage
+    func uploadProfilePhoto(_ imageData: Data) async throws -> String {
+        guard let userId = userSession?.uid else {
+            throw AuthError.unknown("No authenticated user")
+        }
+        
+        let storageRef = Storage.storage().reference()
+        let photoRef = storageRef.child("profile_photos/\(userId)/\(UUID().uuidString).jpg")
+        
+        let metadata = StorageMetadata()
+        metadata.contentType = "image/jpeg"
+        
+        _ = try await photoRef.putDataAsync(imageData, metadata: metadata)
+        let downloadURL = try await photoRef.downloadURL()
+        
+        // Update user profile with photo URL
+        try await db.collection("users").document(userId).updateData([
+            "photoURL": downloadURL.absoluteString
+        ])
+        
+        // Update local user profile
+        currentUser?.photoURL = downloadURL.absoluteString
+        
+        // Update completion status
+        updateProfileCompletion()
+        
+        return downloadURL.absoluteString
+    }
+    
+    /// Updates user profile fields
+    func updateProfile(_ updates: [String: Any]) async throws {
+        guard let userId = userSession?.uid else {
+            throw AuthError.unknown("No authenticated user")
+        }
+        
+        try await db.collection("users").document(userId).updateData(updates)
+        
+        // Refresh user profile
+        try await fetchUserProfile()
+        
+        // Update completion status
+        updateProfileCompletion()
+    }
+}
+
+enum ProfileCompletionStatus {
+    case incomplete
+    case basic
+    case complete
+    
+    var description: String {
+        switch self {
+        case .incomplete: return "Profile Incomplete"
+        case .basic: return "Basic Profile"
+        case .complete: return "Profile Complete"
+        }
+    }
+}
+
+enum ProfileField: String, CaseIterable {
+    case photos
+    case bio
+    case interests
+    case faith
+    case location
+    case preferences
+    
+    var description: String {
+        switch self {
+        case .photos: return "Profile Photos"
+        case .bio: return "About Me"
+        case .interests: return "Interests"
+        case .faith: return "Faith & Values"
+        case .location: return "Location"
+        case .preferences: return "Preferences"
         }
     }
 } 
